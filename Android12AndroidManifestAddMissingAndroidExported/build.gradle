@@ -1,0 +1,138 @@
+/**
+ * For apps targeting Android 12, if the AndroidManifest.xml file contains <activity>, <activity-alias>, <service>, or
+ * <receiver> components that contain <intent-filter>(s), it is required that those components explicitly declare the
+ * `android:exported` attribute (see https://developer.android.com/about/versions/12/behavior-changes-12#exported).
+ * This file contains gradle task for adding missing `android:exported` attributes to AndroidManifest.xml files.
+ *
+ * 1. copy the content of this file to your `build.gradle` file located in your project's root folder.
+ * 2. in terminal (cmd), in your project's root folder, execute `./gradlew doAddAndroidExportedIfNecessary`
+ *
+ * DISCLAIMER: the gradle task is to help you avoid manually adding the `android:exported` attribute. This comes in
+ * handy for projects with large AndroidManifest.xml file, projects with multiple AndroidManifest.xml files due to
+ * multiple flavors and/or multiple app modules. At the end, you should always review changes done on your files
+ * by this gradle task. Check the following links to make sure the added `android:exported` attributes match your
+ * use cases:
+ *  - https://developer.android.com/guide/topics/manifest/activity-element#exported
+ *  - https://developer.android.com/guide/topics/manifest/activity-alias-element#exported
+ *  - https://developer.android.com/guide/topics/manifest/service-element#exported
+ *  - https://developer.android.com/guide/topics/manifest/receiver-element#exported
+ */
+
+import org.w3c.dom.Element
+
+import javax.xml.transform.dom.DOMSource
+import javax.xml.transform.stream.StreamResult
+import javax.xml.transform.TransformerFactory
+import javax.xml.transform.Transformer
+
+/**
+ * For apps targeting Android 12, if the AndroidManifest.xml file contains <activity>, <activity-alias>, <service>, or
+ * <receiver> components that contain <intent-filter>(s), it is required that those components explicitly declare the
+ * `android:exported` attribute (see https://developer.android.com/about/versions/12/behavior-changes-12#exported).
+ *
+ * This function automatically adds the missing `android:exported` attribute to components that require it. Prior to
+ * Android 12, for <activity>, <activity-alias>, <service> and <receiver> components that have <intent-filter>(s), if
+ * the `android:exported` attribute was not set explicitly, the default value would be `true`. The previous statement
+ * is based on researching documentation on the `android:exported` attribute:
+ *  - https://developer.android.com/guide/topics/manifest/activity-element#exported
+ *  - https://developer.android.com/guide/topics/manifest/activity-alias-element#exported
+ *  - https://developer.android.com/guide/topics/manifest/service-element#exported
+ *  - https://developer.android.com/guide/topics/manifest/receiver-element#exported
+ * Therefore, for <activity>, <activity-alias>, <service> and <receiver> components that have <intent-filter>(s), if
+ * the `android:exported` attribute is missing, this function adds the attribute with default value `true`.
+ * For known exceptions, set the value to `false`:
+ *  - firebase messaging service: https://firebase.google.com/docs/cloud-messaging/android/client#manifest
+ *
+ * @param manifestFile the AndroidManifest.xml file to be investigated
+ */
+def addAndroidExportedIfNecessary(File manifestFile) {
+    def manifestAltered = false
+    def reader = manifestFile.newReader()
+    def document = groovy.xml.DOMBuilder.parse(reader)
+    def application = document.getElementsByTagName("application").item(0)
+    if (application != null) {
+        println "Searching for activities, services and receivers with intent filters..."
+        application.childNodes.each { child ->
+            def childNodeName = child.nodeName
+            if (childNodeName == "activity" || childNodeName == "activity-alias" ||
+                    childNodeName == "service" || childNodeName == "receiver") {
+                def attributes = child.getAttributes()
+                if (attributes.getNamedItem("android:exported") == null) {
+                    def intentFilters = child.childNodes.findAll {
+                        it.nodeName == "intent-filter"
+                    }
+                    if (intentFilters.size() > 0) {
+                        println "found ${childNodeName} ${attributes.getNamedItem("android:name").nodeValue} " +
+                                "with intent filters but without android:exported attribute"
+
+                        def exportedAttrAdded = false
+                        for (def i = 0; i < intentFilters.size(); i++) {
+                            def intentFilter = intentFilters[i]
+                            def actions = intentFilter.childNodes.findAll {
+                                it.nodeName == "action"
+                            }
+                            for (def j = 0; j < actions.size(); j++) {
+                                def action = actions[j]
+                                def actionName = action.getAttributes().getNamedItem("android:name").nodeValue
+                                if (actionName == "com.google.firebase.MESSAGING_EVENT") {
+                                    println "adding exported=false to ${attributes.getNamedItem("android:name")}..."
+                                    ((Element) child).setAttribute("android:exported", "false")
+                                    manifestAltered = true
+                                    exportedAttrAdded = true
+                                }
+                            }
+                        }
+                        if (!exportedAttrAdded) {
+                            println "adding exported=true to ${attributes.getNamedItem("android:name")}..."
+                            ((Element) child).setAttribute("android:exported", "true")
+                            manifestAltered = true
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (manifestAltered) {
+        document.setXmlStandalone(true)
+        Transformer transformer = TransformerFactory.newInstance().newTransformer()
+        DOMSource source = new DOMSource(document)
+        FileWriter writer = new FileWriter(manifestFile)
+        StreamResult result = new StreamResult(writer)
+        transformer.transform(source, result)
+        println "Done adding missing android:exported attributes your AndroidManifest.xml. You may want to" +
+                "additionally prettify it in Android Studio using [command + option + L](mac) or [CTRL+ALT+L](windows)."
+    } else {
+        println "Hooray, your AndroidManifest.xml did not need any change."
+    }
+}
+
+/** Find all AndroidManifest.xml files in this project. Relative to the project's root directory, AndroidManifest.xml
+ * files are (should be) located at ./[module]/src/[flavor]/AndroidManifest.xml. The logic below follows that path
+ * structure to find all AndroidManifest.xml files, and for each found, update it to conform to Android 12 requirements
+ * (see [addAndroidExportedIfNecessary]).
+ */
+task doAddAndroidExportedIfNecessary {
+    doLast {
+        def root = new File(project.rootDir, "")
+        if (root.isDirectory()) {
+            def children = root.listFiles()
+            for (def i = 0; i < children.size(); i++) {
+                File child = children[i]
+                if (child.isDirectory()) {
+                    File srcDirectory = new File(child, "src")
+                    if (srcDirectory.exists() && srcDirectory.isDirectory()) {
+                        def srcChildren = srcDirectory.listFiles()
+                        for (def j = 0; j < srcChildren.size(); j++) {
+                            File manifestFile = new File(srcChildren[j], "AndroidManifest.xml")
+                            if (manifestFile.exists() && manifestFile.isFile()) {
+                                println "found manifest file: ${manifestFile.absolutePath}"
+                                addAndroidExportedIfNecessary(manifestFile)
+                                println "-----"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
